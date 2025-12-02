@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 2. Get Token
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("NEW_TELEGRAM_BOT_TOKEN")
 
 # Check if token exists
 if not BOT_TOKEN:
