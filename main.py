@@ -5,52 +5,72 @@ import os
 from telebot import types
 from solana.rpc.api import Client
 from solders.keypair import Keypair
+from dotenv import load_dotenv
 
-# ⚙️ Load Token from Replit Secrets
-# Make sure to add TELEGRAM_BOT_TOKEN in the Secrets tab
-BOT_TOKEN = "6426964193:AAEIKz4EPSTvHNj2oMGwmp2_XQIHDyArO04"
+# 1. Load Environment Variables from .env file
+load_dotenv()
 
-# Fallback if secret is missing (Not recommended for production)
+# 2. Get Token
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+# Check if token exists
 if not BOT_TOKEN:
-    print("❌ Error: TELEGRAM_BOT_TOKEN not found in Secrets.")
-    # You can paste your token here for testing if not using Secrets:
-    # BOT_TOKEN = "YOUR_ACTUAL_TOKEN_HERE"
+    print("❌ CRITICAL ERROR: TELEGRAM_BOT_TOKEN not found.")
+    print("Make sure you have a .env file with TELEGRAM_BOT_TOKEN=your_token_here")
+    exit(1)
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # Dictionary to keep track of each user's scanning state
 user_sessions = {}
 
-# --- HELPER FUNCTIONS ---
+# --- MENU BUILDERS ---
 
-def get_main_keyboard():
-    """Creates the keyboard with Status and Stop buttons"""
+def get_main_menu():
+    """Creates the persistent bottom keyboard with control buttons"""
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    btn_start = types.KeyboardButton('🚀 Start Scanning')
     btn_status = types.KeyboardButton('📊 Status')
     btn_stop = types.KeyboardButton('🛑 Stop')
-    markup.add(btn_status, btn_stop)
+    markup.add(btn_start, btn_status, btn_stop)
     return markup
 
+def get_rpc_menu():
+    """Menu for choosing RPC connection"""
+    markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
+    btn_public = types.KeyboardButton('🌐 Use Public Mainnet')
+    btn_cancel = types.KeyboardButton('🔙 Cancel')
+    markup.add(btn_public, btn_cancel)
+    return markup
+
+# --- SCANNER WORKER ---
+
 def scanner_worker(chat_id):
-    """The background thread that actually scans wallets"""
+    """The background thread that runs the scanning loop"""
     session = user_sessions.get(chat_id)
     if not session: return
 
     rpc_url = session['rpc']
     
     try:
-        # Initialize Solana Client
+        # Initialize connection
         client = Client(rpc_url)
-        # Simple health check (get epoch info or similar)
+        # Quick health check
         client.get_epoch_info()
     except Exception as e:
-        bot.send_message(chat_id, f"⚠️ **RPC Connection Error:**\n`{str(e)}`\n\nStopping scan.", parse_mode='Markdown')
-        session['running'] = False
+        bot.send_message(
+            chat_id, 
+            f"⚠️ **RPC Error:** Could not connect.\n`{str(e)}`\nScanning stopped.", 
+            parse_mode='Markdown',
+            reply_markup=get_main_menu()
+        )
+        if chat_id in user_sessions:
+            user_sessions[chat_id]['running'] = False
         return
 
-    bot.send_message(chat_id, "✅ **RPC Connected!** Scanning started...", parse_mode='Markdown')
+    bot.send_message(chat_id, "✅ **RPC Connected!** Hunting for active wallets...", parse_mode='Markdown')
 
-    while session['running']:
+    while session.get('running', False):
         session['attempts'] += 1
         
         try:
@@ -59,13 +79,12 @@ def scanner_worker(chat_id):
             pubkey = kp.pubkey()
             
             # 2. Check Balance
-            # Note: get_balance returns a response object, accessing .value gives lamports
             resp = client.get_balance(pubkey)
             balance = resp.value
 
             if balance > 0:
                 sol_balance = balance / 1_000_000_000
-                secret_bytes = kp.secret() # byte array
+                secret_bytes = kp.secret()
                 
                 msg = (
                     f"🚨 <b>FOUND FUNDED WALLET!</b> 🚨\n\n"
@@ -74,46 +93,58 @@ def scanner_worker(chat_id):
                     f"🔐 <b>Secret:</b> <code>{secret_bytes}</code>"
                 )
                 bot.send_message(chat_id, msg, parse_mode='HTML')
-                
-                # Optional: Stop after finding one?
-                # session['running'] = False 
 
-        except Exception as e:
-            # Handle rate limits or connection errors
-            # print(f"RPC Error: {e}") # Optional logging
-            time.sleep(2) # Wait longer on error
+        except Exception:
+            # RPC failures (rate limits), just wait a bit
+            time.sleep(2)
 
-        # Rate limit protection (adjust based on RPC limits)
-        # 0.05 = ~20 RPS max (theoretical), RPCs usually lower
+        # Rate limit protection (adjust as needed)
         time.sleep(0.05) 
 
-# --- BOT HANDLERS ---
+# --- BOT COMMANDS & BUTTON HANDLERS ---
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
+    """Entry point for the bot"""
+    bot.send_message(
+        message.chat.id, 
+        "👋 **Solana Sweeper Bot Online**\n\nUse the buttons below to control the scanner.", 
+        parse_mode='Markdown',
+        reply_markup=get_main_menu()
+    )
+
+@bot.message_handler(func=lambda message: message.text == '🚀 Start Scanning')
+def request_rpc(message):
     chat_id = message.chat.id
     
-    # Check if already running
-    if chat_id in user_sessions and user_sessions[chat_id]['running']:
-        bot.send_message(chat_id, "⚠️ Scanner is already running. Use '🛑 Stop' first.")
+    # Don't start if already running
+    if chat_id in user_sessions and user_sessions[chat_id].get('running'):
+        bot.send_message(chat_id, "⚠️ Scanner is already running!", reply_markup=get_main_menu())
         return
 
-    text = (
-        "👋 **Welcome to the Solana Scanner Bot!**\n\n"
-        "To start scanning, please send me a valid **Solana RPC URL**.\n"
-        "_(Example: https://api.mainnet-beta.solana.com)_"
+    msg = bot.send_message(
+        chat_id, 
+        "🔗 **Select RPC Connection:**\n\nPaste a custom HTTPs URL, or click the button below for the public node.", 
+        parse_mode='Markdown',
+        reply_markup=get_rpc_menu()
     )
-    
-    msg = bot.send_message(chat_id, text, parse_mode='Markdown')
     bot.register_next_step_handler(msg, process_rpc_input)
 
 def process_rpc_input(message):
     chat_id = message.chat.id
-    rpc_url = message.text.strip()
+    text = message.text.strip()
 
-    # Basic validation
-    if not rpc_url.startswith("http"):
-        msg = bot.send_message(chat_id, "❌ Invalid URL. Please send a valid RPC link (starting with http/https):")
+    if text == '🔙 Cancel':
+        bot.send_message(chat_id, "Action cancelled.", reply_markup=get_main_menu())
+        return
+
+    # Determine URL
+    if text == '🌐 Use Public Mainnet':
+        rpc_url = "https://api.mainnet-beta.solana.com"
+    elif text.startswith("http"):
+        rpc_url = text
+    else:
+        msg = bot.send_message(chat_id, "❌ Invalid URL. Please try again or Cancel:", reply_markup=get_rpc_menu())
         bot.register_next_step_handler(msg, process_rpc_input)
         return
 
@@ -124,14 +155,14 @@ def process_rpc_input(message):
         'rpc': rpc_url
     }
 
-    # Start the Scanner Thread
+    # Start Thread
     threading.Thread(target=scanner_worker, args=(chat_id,), daemon=True).start()
 
     bot.send_message(
         chat_id, 
-        f"🚀 **Scanner Initialized!**\nRPC: `{rpc_url}`\n\nConnecting...", 
+        f"🚀 **Scanner Initialized!**\nTargeting: `{rpc_url}`", 
         parse_mode='Markdown',
-        reply_markup=get_main_keyboard()
+        reply_markup=get_main_menu()
     )
 
 @bot.message_handler(func=lambda message: message.text == '📊 Status')
@@ -140,38 +171,33 @@ def status_handler(message):
     session = user_sessions.get(chat_id)
 
     if not session or not session.get('running'):
-        bot.send_message(chat_id, "⚠️ No active scan running. Type /start to begin.", reply_markup=types.ReplyKeyboardRemove())
+        bot.send_message(chat_id, "😴 **Status:** Idle (Not scanning)", reply_markup=get_main_menu())
         return
 
     text = (
-        f"🤖 **Bot Status: ONLINE**\n"
-        f"🔄 Iterations: `{session['attempts']}`\n"
-        f"🌐 RPC: Connected"
+        f"🤖 **STATUS REPORT**\n"
+        f"✅ System: Online\n"
+        f"🔄 Scanned: `{session['attempts']}` wallets\n"
+        f"🌐 Connection: Active"
     )
-    bot.send_message(chat_id, text, parse_mode='Markdown')
+    bot.send_message(chat_id, text, parse_mode='Markdown', reply_markup=get_main_menu())
 
 @bot.message_handler(func=lambda message: message.text == '🛑 Stop')
 def stop_handler(message):
     chat_id = message.chat.id
     session = user_sessions.get(chat_id)
 
-    if session and session['running']:
+    if session and session.get('running'):
         session['running'] = False
-        bot.send_message(chat_id, "🛑 **Scanner Stopped.**", reply_markup=types.ReplyKeyboardRemove())
-        # Clean up session
-        del user_sessions[chat_id]
+        bot.send_message(chat_id, "🛑 **Scanner Stopped.**", reply_markup=get_main_menu())
     else:
-        bot.send_message(chat_id, "⚠️ No scan is currently running.", reply_markup=types.ReplyKeyboardRemove())
+        bot.send_message(chat_id, "⚠️ No active scan to stop.", reply_markup=get_main_menu())
 
-def main():
-    if not BOT_TOKEN:
-        print("Please set TELEGRAM_BOT_TOKEN in Replit Secrets.")
-        return
-
-    print("🤖 Bot is running...")
-    # remove_webhook is useful if switching from webhook to polling
-    bot.remove_webhook()
-    bot.infinity_polling()
-
+# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    main()
+    print("🤖 Bot started...")
+    try:
+        bot.remove_webhook()
+        bot.infinity_polling()
+    except Exception as e:
+        print(f"❌ Critical Error: {e}")
