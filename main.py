@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 # 1. Load Environment Variables
 load_dotenv()
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("NEW_TELEGRAM_BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
 
 # Validation
