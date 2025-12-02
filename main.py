@@ -8,7 +8,7 @@ from solders.keypair import Keypair
 
 # ⚙️ Load Token from Replit Secrets
 # Make sure to add TELEGRAM_BOT_TOKEN in the Secrets tab
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = "6426964193:AAEIKz4EPSTvHNj2oMGwmp2_XQIHDyArO04"
 
 # Fallback if secret is missing (Not recommended for production)
 if not BOT_TOKEN:
