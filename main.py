@@ -5,6 +5,7 @@ import time
 import threading
 import base58
 from datetime import datetime
+
 # --- IMPORTS ---
 import telebot
 from telebot import types
@@ -12,11 +13,12 @@ from solana.rpc.api import Client
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.system_program import TransferParams, transfer
-from solders.transaction import Transaction # <--- FIXED: Changed from solana.transaction
+from solders.transaction import Transaction 
+from solders.message import Message # <--- ADDED: Required for new transaction format
 from dotenv import load_dotenv
 
 load_dotenv()
-BOT_TOKEN = os.getenv("NEW_TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 if not BOT_TOKEN:
     print("❌ ERROR: TELEGRAM_BOT_TOKEN not found in .env")
@@ -85,28 +87,34 @@ def sweeper_worker(chat_id, private_key_str, dest_address):
             if balance > FEE_BUFFER:
                 amount_to_send = balance - FEE_BUFFER
                 
-                # Create Transaction
+                # 1. Create Instruction
                 ix = transfer(TransferParams(
                     from_pubkey=sender_pubkey,
                     to_pubkey=dest_pubkey,
                     lamports=amount_to_send
                 ))
                 
-                txn = Transaction().add(ix)
+                # 2. Get Blockhash
                 recent_blockhash = client.get_latest_blockhash().value.blockhash
-                txn.recent_blockhash = recent_blockhash
                 
-                # Send
-                resp = client.send_transaction(txn, sender_kp)
+                # 3. Create Message
+                msg = Message([ix], sender_pubkey)
+                
+                # 4. Create & Sign Transaction (Solders Style)
+                # Arguments: [List of Signers], Message, Blockhash
+                txn = Transaction([sender_kp], msg, recent_blockhash)
+                
+                # 5. Send
+                resp = client.send_transaction(txn)
                 
                 sol_amt = amount_to_send / 1_000_000_000
                 bot.send_message(chat_id, f"🧹 **SWEPT!**\nMoved {sol_amt} SOL\nSig: `{resp.value}`", parse_mode='Markdown')
                 
-                # Optional: Sleep longer after success
+                # Sleep longer after success to let block finalize
                 time.sleep(10)
             
         except Exception as e:
-            print(f"Sweep Error: {e}")
+            # print(f"Sweep Error: {e}") 
             time.sleep(2)
             
         time.sleep(1) # Check every second
