@@ -16,13 +16,13 @@ from solana.transaction import Transaction
 from dotenv import load_dotenv
 
 load_dotenv()
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("NEW_TELEGRAM_BOT_TOKEN")
 
 if not BOT_TOKEN:
     print("❌ ERROR: TELEGRAM_BOT_TOKEN not found in .env")
     exit(1)
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot("BOT_TOKEN")
 
 # Store user states
 # Structure: { chat_id: { 'mode': 'sweep'/'vanity', 'sweep_running': bool, 'vanity_running': bool } }
