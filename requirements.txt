@@ -2,3 +2,4 @@ pyTelegramBotAPI
 solana
 solders
 python-dotenv
+base58
