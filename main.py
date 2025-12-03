@@ -80,12 +80,14 @@ def sweeper_worker(chat_id, private_key_str, dest_address):
             # Check Balance
             balance_resp = client.get_balance(sender_pubkey)
             balance = balance_resp.value
+            print("balance = " + balance)
             
             # Fee buffer (5000 lamports for sig + wiggle room)
             FEE_BUFFER = 5000 
 
             if balance > FEE_BUFFER:
                 amount_to_send = balance - FEE_BUFFER
+                print("amount to send = "+ amount_to_send)
                 
                 # 1. Create Instruction
                 ix = transfer(TransferParams(
