@@ -210,7 +210,7 @@ def vanity_start(message):
         bot.send_message(chat_id, "❌ Invalid Base58 characters (0, O, I, l are not allowed).", reply_markup=get_main_menu())
         return
         
-    if len(prefix) > 5:
+    if len(prefix) > 8:
         bot.send_message(chat_id, "❌ Prefix too long (Max 5 chars for cloud bots).", reply_markup=get_main_menu())
         return
 
