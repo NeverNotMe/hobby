@@ -12,7 +12,7 @@ from solana.rpc.api import Client
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.system_program import TransferParams, transfer
-from solana.transaction import Transaction
+from solders.transaction import Transaction # <--- FIXED: Changed from solana.transaction
 from dotenv import load_dotenv
 
 load_dotenv()
