@@ -22,7 +22,7 @@ if not BOT_TOKEN:
     print("❌ ERROR: TELEGRAM_BOT_TOKEN not found in .env")
     exit(1)
 
-bot = telebot.TeleBot("BOT_TOKEN")
+bot = telebot.TeleBot(BOT_TOKEN)
 
 # Store user states
 # Structure: { chat_id: { 'mode': 'sweep'/'vanity', 'sweep_running': bool, 'vanity_running': bool } }
