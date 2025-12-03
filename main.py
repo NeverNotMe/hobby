@@ -18,7 +18,7 @@ from solders.message import Message # <--- ADDED: Required for new transaction f
 from dotenv import load_dotenv
 
 load_dotenv()
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BOT_TOKEN = os.getenv("NEW_TELEGRAM_BOT_TOKEN")
 
 if not BOT_TOKEN:
     print("❌ ERROR: TELEGRAM_BOT_TOKEN not found in .env")
