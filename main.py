@@ -33,7 +33,7 @@ bot = telebot.TeleBot(BOT_TOKEN)
 user_sessions = {}
 
 # RPC URL
-RPC_URL = "https://api.mainnet-beta.solana.com"
+RPC_URL = os.getenv("CUSTOM_RPC")
 client = Client(RPC_URL, commitment=Confirmed)
 
 # CONSTANTS
